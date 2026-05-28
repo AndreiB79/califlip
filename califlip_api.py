@@ -1180,3 +1180,138 @@ def _compute_flip_scores(price, listing, arv_base_comps, tech_score, flood_risk,
     # Legacy fields for backwards compat
     scores["repair_label"] = repair_label
     return scores
+
+
+# ---------- RENOVATION PRESETS (Inland Empire 2026) ----------
+
+RENOVATION_PRESETS = {
+    "cosmetic": {
+        "label": "💄 Косметика",
+        "cost_per_sqft": 30,
+        "description": "Краска, ламинат, fixtures, уборка. Кухня/ванная не трогаем.",
+        "default_reno_months": 2,
+    },
+    "medium": {
+        "label": "🔧 Средний",
+        "cost_per_sqft": 55,
+        "description": "Кухня + ванная update, бытовая техника, ландшафт.",
+        "default_reno_months": 4,
+    },
+    "heavy": {
+        "label": "🏗 Тяжёлый",
+        "cost_per_sqft": 85,
+        "description": "HVAC, сантехника, электрика + полная отделка.",
+        "default_reno_months": 6,
+    },
+    "gut": {
+        "label": "🔨 Капитальный",
+        "cost_per_sqft": 130,
+        "description": "Всё под ноль, всё новое. Fire damage, очень старый дом.",
+        "default_reno_months": 9,
+    },
+}
+
+
+def flip_calculator_2026(
+    purchase_price,
+    sqft,
+    arv,
+    renovation_type="medium",
+    custom_repair_total=None,
+    contingency_pct=0.15,
+    financing="hard_money",
+    hard_money_rate=0.11,
+    hard_money_points=2.0,
+    hard_money_ltv=0.80,
+    hold_months=6,
+    selling_costs_pct=0.065,
+):
+    """
+    Реальный калькулятор флипа 2026 Inland Empire California.
+    Учитывает hard money, contingency, NAR post-settlement commissions.
+    Язык: вложил / потратил / в кармане.
+    """
+    if not purchase_price or not arv or not sqft:
+        return {}
+
+    preset = RENOVATION_PRESETS.get(renovation_type, RENOVATION_PRESETS["medium"])
+
+    # Ремонт
+    if custom_repair_total is not None and custom_repair_total > 0:
+        base_repair = float(custom_repair_total)
+    else:
+        base_repair = preset["cost_per_sqft"] * sqft
+
+    contingency = base_repair * contingency_pct
+    total_repair = base_repair + contingency
+
+    # Расходы на покупку
+    if financing == "hard_money":
+        loan_amount = purchase_price * hard_money_ltv
+        points_cost = loan_amount * (hard_money_points / 100)
+        buying_costs = points_cost + 1500 + 3500
+    else:
+        loan_amount = 0
+        points_cost = 0
+        buying_costs = 3500
+
+    # Holding costs
+    monthly_tax = purchase_price * 0.0125 / 12
+    monthly_insurance = 150
+    monthly_utilities = 250
+    monthly_non_loan = monthly_tax + monthly_insurance + monthly_utilities
+    monthly_interest = (loan_amount * hard_money_rate / 12) if financing == "hard_money" else 0
+    monthly_carrying = monthly_non_loan + monthly_interest
+    total_carrying = monthly_carrying * hold_months
+
+    # Selling costs (NAR 2024: ~3% listing + ~2.5% buyer + ~1% escrow/title)
+    selling_costs = arv * selling_costs_pct
+
+    total_spent = purchase_price + total_repair + buying_costs + total_carrying + selling_costs
+    net_profit = arv - total_spent
+
+    # MAO — 65% rule Inland Empire 2026
+    mao = arv * 0.65 - total_repair
+    discount_needed = max(0, purchase_price - mao)
+    discount_pct = discount_needed / purchase_price if purchase_price else 0
+
+    if mao > 0:
+        if financing == "hard_money":
+            bc_mao = mao * hard_money_ltv * (hard_money_points / 100) + 1500 + 3500
+            cc_mao = (mao * hard_money_ltv * hard_money_rate / 12 + monthly_non_loan) * hold_months
+        else:
+            bc_mao = 3500
+            cc_mao = monthly_non_loan * hold_months
+        profit_at_mao = arv - mao - total_repair - bc_mao - cc_mao - selling_costs
+    else:
+        profit_at_mao = 0
+
+    verdict = "green" if net_profit >= 30000 else ("yellow" if net_profit >= 10000 else "red")
+
+    return {
+        "purchase_price": purchase_price,
+        "arv": arv,
+        "sqft": sqft,
+        "financing": financing,
+        "hold_months": hold_months,
+        "renovation_type": renovation_type,
+        "preset": preset,
+        "base_repair": base_repair,
+        "contingency": contingency,
+        "total_repair": total_repair,
+        "loan_amount": loan_amount,
+        "points_cost": points_cost,
+        "buying_costs": buying_costs,
+        "monthly_interest": monthly_interest,
+        "monthly_non_loan": monthly_non_loan,
+        "monthly_carrying": monthly_carrying,
+        "total_carrying": total_carrying,
+        "selling_costs": selling_costs,
+        "total_spent": total_spent,
+        "net_profit": net_profit,
+        "mao": mao,
+        "discount_needed": discount_needed,
+        "discount_pct": discount_pct,
+        "profit_at_mao": profit_at_mao,
+        "verdict": verdict,
+    }
