@@ -53,7 +53,7 @@ def _load_env():
 
 _ENV = _load_env()
 RAPIDAPI_KEY = _ENV.get("RAPIDAPI_KEY", "")
-RAPIDAPI_HOST = _ENV.get("RAPIDAPI_HOST", "zillow-property-data-api1.p.rapidapi.com")
+RAPIDAPI_HOST = "zillow-property-data-api1.p.rapidapi.com"
 
 
 # ---------- РЕКОМЕНДОВАННЫЕ РЫНКИ ДЛЯ CULVER CITY FLIPPER ----------
