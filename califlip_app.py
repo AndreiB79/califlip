@@ -11,7 +11,8 @@ import pandas as pd
 from califlip_api import (fetch_zillow_listings, quick_score, deep_analysis,
                           apply_client_filters, detect_county, has_full_county_support,
                           fixer_score, ZIP_RECOMMENDATIONS, PRESET_BUNDLES, get_smart_filters,
-                          fetch_sold_comps, estimate_profit_quick)
+                          fetch_sold_comps, estimate_profit_quick,
+                          RENOVATION_PRESETS, flip_calculator_2026)
 from califlip import ARV_MULT_PESSIMISTIC, ARV_MULT_REALISTIC, ARV_MULT_OPTIMISTIC, extract_address
 import re as _re
 
@@ -203,6 +204,236 @@ def _render_deep(deep):
 
 ⚠️ Эти числа — **прогноз**. Реальный ремонт может стоить дороже, реальная продажная цена — другая. Это **screener**, не оракул. Едь смотри глазами.
         """)
+
+
+
+def _render_flip_calculator(target, sold_comps):
+    """Новый упрощённый калькулятор флипа 2026. Язык: вложил/потратил/в кармане."""
+    sqft = target.get("sqft") or 0
+    purchase_price = target.get("price") or 0
+    zestimate = target.get("zestimate") or 0
+
+    if not sqft or not purchase_price:
+        st.warning("Нет данных о цене или площади — калькулятор недоступен.")
+        return
+
+    # ARV из sold comps
+    similar = [s for s in sold_comps
+               if s.get("sqft") and sqft * 0.75 <= s["sqft"] <= sqft * 1.25
+               and s.get("price_per_sqft")]
+    psqfts = sorted([s["price_per_sqft"] for s in similar])
+    if psqfts:
+        median_psqft = psqfts[len(psqfts) // 2]
+        arv_auto = int(median_psqft * sqft)
+        arv_source = f"медиана ${median_psqft}/sqft × {sqft:,} sqft ({len(similar)} аналогов в ZIP)"
+    elif zestimate:
+        arv_auto = int(zestimate)
+        arv_source = "Zestimate от Zillow (sold comps не нашлись)"
+    else:
+        st.warning("Нет данных для расчёта ARV — нужны sold comps или Zestimate.")
+        return
+
+    st.markdown("## 🧮 Калькулятор флипа")
+
+    # ARV — пользователь может скорректировать
+    col_arv, col_arv_info = st.columns([1, 2])
+    with col_arv:
+        arv = st.number_input(
+            "💰 Продашь после ремонта (ARV) $",
+            value=arv_auto, min_value=50000, max_value=5000000, step=5000,
+            key="flip_arv",
+        )
+    with col_arv_info:
+        st.caption(f"Авто-расчёт: {arv_source}")
+        if arv != arv_auto:
+            st.caption(f"✏️ Изменено вручную (авто было ${arv_auto:,})")
+
+    st.markdown("---")
+
+    # Уровень ремонта
+    st.markdown("#### 🔧 Уровень ремонта (твоя оценка после просмотра)")
+    preset_keys = list(RENOVATION_PRESETS.keys())
+
+    reno_labels = []
+    for k in preset_keys:
+        p = RENOVATION_PRESETS[k]
+        cost = p["cost_per_sqft"] * sqft
+        reno_labels.append(f"{p['label']}  ·  ${p['cost_per_sqft']}/sqft = ~${cost:,.0f}")
+
+    reno_idx = st.radio(
+        "Состояние дома:",
+        options=list(range(len(preset_keys))),
+        format_func=lambda i: reno_labels[i],
+        index=1,
+        horizontal=False,
+        key="flip_reno_idx",
+    )
+    reno_type = preset_keys[reno_idx]
+    preset = RENOVATION_PRESETS[reno_type]
+    st.caption(f"_{preset['description']}_")
+
+    custom_reno = st.number_input(
+        "Или введи свою сумму ремонта $ (оставь 0 чтобы использовать пресет выше)",
+        min_value=0, max_value=1000000, value=0, step=5000,
+        key="flip_custom_reno",
+    )
+
+    contingency_pct = st.slider(
+        "Запас на неожиданности %",
+        min_value=0, max_value=30, value=15, step=5,
+        help="Реальные флипперы закладывают 15-20% — всегда что-то вылезает.",
+        key="flip_contingency",
+    )
+
+    st.markdown("---")
+
+    # Финансирование
+    st.markdown("#### 💳 Как покупаешь")
+    financing = st.radio(
+        "Источник денег:",
+        options=["hard_money", "cash"],
+        format_func=lambda x: (
+            "🏦 Hard money  ·  11% годовых + 2 points (самый распространённый у флипперов)"
+            if x == "hard_money"
+            else "💵 Наличные / своя ипотека  ·  без процентов по займу"
+        ),
+        horizontal=False,
+        key="flip_financing",
+    )
+
+    col_hold, col_rate = st.columns(2)
+    with col_hold:
+        default_months = preset["default_reno_months"] + 2
+        hold_months = st.slider(
+            "Месяцев держишь (ремонт + продажа)",
+            min_value=2, max_value=18, value=default_months, step=1,
+            help="В Riverside сейчас ~49 дней до продажи после листинга (+2 мес). Не занижай.",
+            key="flip_hold",
+        )
+    with col_rate:
+        if financing == "hard_money":
+            hm_rate = st.slider(
+                "Ставка hard money %/год",
+                min_value=8.0, max_value=15.0, value=11.0, step=0.5,
+                key="flip_hm_rate",
+            )
+        else:
+            hm_rate = 11.0
+            st.caption("Без hard money — экономишь на процентах.")
+
+    # Считаем
+    calc = flip_calculator_2026(
+        purchase_price=purchase_price,
+        sqft=sqft,
+        arv=arv,
+        renovation_type=reno_type,
+        custom_repair_total=custom_reno if custom_reno > 0 else None,
+        contingency_pct=contingency_pct / 100,
+        financing=financing,
+        hard_money_rate=hm_rate / 100,
+        hold_months=hold_months,
+    )
+    if not calc:
+        return
+
+    net = calc["net_profit"]
+    st.markdown("---")
+    st.markdown("## 📊 Результат")
+
+    if calc["verdict"] == "green":
+        st.success(f"### 🟢 В КАРМАН: +${int(net):,}
+
+Стоит съездить посмотреть глазами")
+    elif calc["verdict"] == "yellow":
+        st.warning(f"### 🟡 В КАРМАН: +${int(net):,}
+
+На грани — только если очень понравится вживую")
+    else:
+        st.error(f"### 🔴 В КАРМАН: {'−' if net < 0 else '+'}${abs(int(net)):,}
+
+По этой цене денег нет")
+
+    # Чек
+    rows = [
+        ("🏠 Купишь дом", f"−${int(purchase_price):,}"),
+    ]
+    if custom_reno > 0:
+        rows.append((f"🔧 Ремонт (свой ввод) + {contingency_pct}% запас",
+                     f"−${int(calc['total_repair']):,}"))
+    else:
+        rows.append((f"🔧 Ремонт ({preset['label']}, ${preset['cost_per_sqft']}/sqft) + {contingency_pct}% запас",
+                     f"−${int(calc['total_repair']):,}"))
+
+    if financing == "hard_money":
+        rows.append((f"📋 Оформление покупки  (hard money {calc['loan_amount']:,.0f} × 2pts + escrow)",
+                     f"−${int(calc['buying_costs']):,}"))
+        rows.append((f"⏱ Держишь {hold_months} мес  (проценты ${calc['monthly_interest']:,.0f}/мес + налог/страховка/утилиты)",
+                     f"−${int(calc['total_carrying']):,}"))
+    else:
+        rows.append(("📋 Оформление покупки  (escrow + title + inspection)",
+                     f"−${int(calc['buying_costs']):,}"))
+        rows.append((f"⏱ Держишь {hold_months} мес  (налог + страховка + утилиты)",
+                     f"−${int(calc['total_carrying']):,}"))
+
+    rows.append((f"👔 Продажа с агентами (6.5% от ${int(arv):,})",
+                 f"−${int(calc['selling_costs']):,}"))
+    rows.append(("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", ""))
+    rows.append(("📤 ИТОГО ПОТРАТИШЬ", f"−${int(calc['total_spent']):,}"))
+    rows.append(("💰 Продашь после ремонта", f"+${int(arv):,}"))
+    rows.append(("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", ""))
+    rows.append(("🎯 В КАРМАНЕ", f"{'−' if net < 0 else '+'}${abs(int(net)):,}"))
+
+    df_check = pd.DataFrame(rows, columns=["Статья", "Сумма"])
+    st.table(df_check.set_index("Статья"))
+
+    # MAO блок
+    mao = calc["mao"]
+    st.markdown("### 💡 Максимальная цена покупки (MAO)")
+    if mao > 0:
+        mao_col1, mao_col2 = st.columns(2)
+        with mao_col1:
+            st.metric("Нужно купить не дороже (65% правило IE)", f"${int(mao):,}")
+            st.metric("Zillow просит", f"${int(purchase_price):,}")
+        with mao_col2:
+            if calc["discount_needed"] > 0:
+                st.metric(
+                    "Нужен торг",
+                    f"−${int(calc['discount_needed']):,}",
+                    delta=f"−{calc['discount_pct']*100:.0f}% от цены",
+                    delta_color="inverse",
+                )
+                if calc["discount_pct"] > 0.25:
+                    st.error("Нужен торг >25% — реально только на distressed/probate/аукционе.")
+                elif calc["discount_pct"] > 0.12:
+                    st.warning("Торг 12-25% — сложно, но возможно при 90+ дней на рынке.")
+                else:
+                    st.success("Торг <12% — вполне реальный на текущем рынке.")
+            else:
+                st.success(f"✅ Цена уже ниже MAO — можно покупать по листингу!")
+                st.metric("Запас прочности", f"+${int(-calc['discount_needed']):,}")
+
+        if calc["profit_at_mao"] > 0:
+            st.info(f"💬 Если купишь за MAO ${int(mao):,} — в кармане будет **${int(calc['profit_at_mao']):,}**")
+
+    # Ссылки на off-market источники по этому ZIP
+    zip_code = target.get("zip") or ""
+    if zip_code:
+        with st.expander("🏛 Найти этот дом дешевле — off-market источники"):
+            st.markdown(f"""
+**Аукционы (Foreclosure / REO) — самый большой дисконт:**
+- [Auction.com — ZIP {zip_code}](https://www.auction.com/residential/search?zip={zip_code})
+- [Hubzu — аукционы банк-owned](https://www.hubzu.com/)
+- [RealtyTrac CA](https://www.realtytrac.com/ca/foreclosure/auction/)
+
+**Probate / Pre-Foreclosure данные:**
+- [Foreclosure.com — ZIP {zip_code}](https://www.foreclosure.com/listing/detail/?zip={zip_code})
+- [US Probate Leads](https://www.usprobateleads.com/)
+
+**Investor платформы (платные, но мощные):**
+- [PropStream $99/мес](https://www.propstream.com/) — 160M+ объектов, 165 фильтров
+- [PropertyRadar $119/мес](https://www.propertyradar.com/) — лучшее покрытие CA, NOD в реальном времени
+            """)
+
 
 # ---------- HEADER ----------
 st.title("🏠 CaliFlip — массовый скрининг флипов в Калифорнии")
@@ -564,25 +795,10 @@ def _render_single_result(result):
                     "Возможно он off-market, pending, или recently sold. "
                     "Статистика района ниже покажет картину рынка.")
 
-        # ===== КНОПКА ФЛИП РАСЧЁТА =====
+        # ===== КАЛЬКУЛЯТОР ФЛИПА (инлайн, без кнопки) =====
         if target:
             st.markdown("---")
-            col_btn, col_hint = st.columns([1, 2])
-            with col_btn:
-                if st.button("🧮 Рассчитать флип", type="primary", use_container_width=True):
-                    with st.spinner("Запускаю полный анализ — county data, ARV, расчёт прибыли..."):
-                        try:
-                            st.session_state.single_deep = deep_analysis(target)
-                        except Exception as e:
-                            st.error(f"❌ Ошибка анализа: {e}")
-                    st.rerun()
-            with col_hint:
-                st.caption("Нажми чтобы получить: реалистичный offer, чистую прибыль, "
-                           "расчёт всех расходов, county data (для Riverside)")
-
-        if st.session_state.get("single_deep"):
-            st.markdown("---")
-            _render_deep(st.session_state.single_deep)
+            _render_flip_calculator(target, sold_comps)
 
         # ===== ТАБЛИЦА ВСЕХ ПРОДАЖ =====
         st.markdown(f"## 🏘 Все {len(sold_comps)} проданных домов за 6 мес")
