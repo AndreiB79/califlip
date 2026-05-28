@@ -414,9 +414,12 @@ if clear_btn:
 
 if "single_result" not in st.session_state:
     st.session_state.single_result = None
+if "single_deep" not in st.session_state:
+    st.session_state.single_deep = None
 
 if clear_single_btn:
     st.session_state.single_result = None
+    st.session_state.single_deep = None
     st.rerun()
 
 
@@ -560,6 +563,26 @@ def _render_single_result(result):
             st.info(f"⚠️ Этот дом не нашёлся среди active listings ZIP {zip_code}. "
                     "Возможно он off-market, pending, или recently sold. "
                     "Статистика района ниже покажет картину рынка.")
+
+        # ===== КНОПКА ФЛИП РАСЧЁТА =====
+        if target:
+            st.markdown("---")
+            col_btn, col_hint = st.columns([1, 2])
+            with col_btn:
+                if st.button("🧮 Рассчитать флип", type="primary", use_container_width=True):
+                    with st.spinner("Запускаю полный анализ — county data, ARV, расчёт прибыли..."):
+                        try:
+                            st.session_state.single_deep = deep_analysis(target)
+                        except Exception as e:
+                            st.error(f"❌ Ошибка анализа: {e}")
+                    st.rerun()
+            with col_hint:
+                st.caption("Нажми чтобы получить: реалистичный offer, чистую прибыль, "
+                           "расчёт всех расходов, county data (для Riverside)")
+
+        if st.session_state.get("single_deep"):
+            st.markdown("---")
+            _render_deep(st.session_state.single_deep)
 
         # ===== ТАБЛИЦА ВСЕХ ПРОДАЖ =====
         st.markdown(f"## 🏘 Все {len(sold_comps)} проданных домов за 6 мес")
