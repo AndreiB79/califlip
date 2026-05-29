@@ -341,17 +341,15 @@ def _render_flip_calculator(target, sold_comps):
     st.markdown("## 📊 Результат")
 
     if calc["verdict"] == "green":
-        st.success(f"### 🟢 В КАРМАН: +${int(net):,}
-
-Стоит съездить посмотреть глазами")
+        msg = f"### Результат: В КАРМАН +${int(net):,}"
+        st.success(msg + "\n\nСтоит съездить посмотреть глазами")
     elif calc["verdict"] == "yellow":
-        st.warning(f"### 🟡 В КАРМАН: +${int(net):,}
-
-На грани — только если очень понравится вживую")
+        msg = f"### Результат: В КАРМАН +${int(net):,}"
+        st.warning(msg + "\n\nНа грани — только если очень понравится вживую")
     else:
-        st.error(f"### 🔴 В КАРМАН: {'−' if net < 0 else '+'}${abs(int(net)):,}
-
-По этой цене денег нет")
+        sign = "-" if net < 0 else "+"
+        msg = "### Результат: В КАРМАН " + sign + f"${abs(int(net)):,}"
+        st.error(msg + "\n\nПо этой цене денег нет")
 
     # Чек
     rows = [
@@ -381,7 +379,8 @@ def _render_flip_calculator(target, sold_comps):
     rows.append(("📤 ИТОГО ПОТРАТИШЬ", f"−${int(calc['total_spent']):,}"))
     rows.append(("💰 Продашь после ремонта", f"+${int(arv):,}"))
     rows.append(("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", ""))
-    rows.append(("🎯 В КАРМАНЕ", f"{'−' if net < 0 else '+'}${abs(int(net)):,}"))
+    _s = "-" if net < 0 else "+"
+    rows.append(("🎯 В КАРМАНЕ", _s + f"${abs(int(net)):,}"))
 
     df_check = pd.DataFrame(rows, columns=["Статья", "Сумма"])
     st.table(df_check.set_index("Статья"))
