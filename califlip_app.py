@@ -792,9 +792,44 @@ def _render_single_result(result):
                     for h in highlights:
                         st.markdown(f"- {h}")
         else:
-            st.info(f"⚠️ Этот дом не нашёлся среди active listings ZIP {zip_code}. "
-                    "Возможно он off-market, pending, или recently sold. "
-                    "Статистика района ниже покажет картину рынка.")
+            st.warning(
+                f"Дом не нашёлся в active listings ZIP {zip_code} через API. "
+                "Введи данные вручную — калькулятор всё равно посчитает."
+            )
+            # Ручной ввод когда дом не в active listings
+            st.markdown("#### Введи данные с Zillow вручную")
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                m_price = st.number_input("Цена листинга $", min_value=50000,
+                    max_value=5000000, value=300000, step=5000, key="m_price")
+                m_sqft  = st.number_input("Площадь sqft", min_value=300,
+                    max_value=10000, value=1200, step=50, key="m_sqft")
+            with mc2:
+                m_beds  = st.number_input("Спален", min_value=1, max_value=10,
+                    value=3, step=1, key="m_beds")
+                m_baths = st.number_input("Ванных", min_value=1, max_value=10,
+                    value=2, step=1, key="m_baths")
+            with mc3:
+                m_year  = st.number_input("Год постройки", min_value=1900,
+                    max_value=2026, value=1980, step=1, key="m_year")
+                m_zest  = st.number_input("Zestimate $ (если знаешь, иначе 0)",
+                    min_value=0, max_value=5000000, value=0, step=5000, key="m_zest")
+
+            target = {
+                "address_street": address,
+                "address_full": address,
+                "zip": zip_code,
+                "price": m_price,
+                "sqft": m_sqft,
+                "beds": m_beds,
+                "baths": m_baths,
+                "year_built": m_year,
+                "zestimate": m_zest if m_zest > 0 else None,
+                "price_per_sqft": int(m_price / m_sqft) if m_sqft else None,
+                "days_on_market": None,
+                "highlights": [],
+                "photo_url": None,
+            }
 
         # ===== КАЛЬКУЛЯТОР ФЛИПА (инлайн, без кнопки) =====
         if target:
