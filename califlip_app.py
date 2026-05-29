@@ -662,8 +662,10 @@ def _run_single_url_analysis(url):
         st.error("Не смог извлечь адрес из URL. Проверь что это правильная Zillow ссылка.")
         return None
 
-    # Извлекаем ZIP
-    zip_match = _re.search(r"\b(\d{5})\b", address)
+    # Извлекаем ZIP — ищем после "CA " чтобы не спутать с номером дома (12494 ≠ ZIP)
+    zip_match = _re.search(r"\bCA\s+(\d{5})\b", address)
+    if not zip_match:
+        zip_match = _re.search(r"\b(9\d{4})\b", address)  # fallback: CA ZIP начинается с 9
     if not zip_match:
         st.error(f"Не нашёл ZIP в адресе '{address}'.")
         return None
