@@ -536,6 +536,7 @@ def _normalize_zillow_listing(prop):
         "lat": (prop.get("location") or {}).get("latitude"),
         "lon": (prop.get("location") or {}).get("longitude"),
         "highlights": _extract_highlights(prop),
+        "_source": "zillow",
     }
 
 
@@ -1315,3 +1316,318 @@ def flip_calculator_2026(
         "profit_at_mao": profit_at_mao,
         "verdict": verdict,
     }
+
+
+# ============================================================
+# REDFIN DATA SOURCE (внутренний Stingray CSV API)
+# ============================================================
+
+def fetch_redfin_listings(location, price_min=None, price_max=None,
+                           bed_min=None, year_max=None, max_pages=1,
+                           on_progress=None):
+    """
+    Получает активные листинги SFH из Redfin через внутренний Stingray CSV API.
+    Бесплатно, без ключей. До 350 домов на ZIP.
+
+    Returns: (listings_list, error_msg_or_None)
+    """
+    import io
+    import csv as _csv
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.redfin.com/",
+    }
+
+    # Извлекаем ZIP из строки локации
+    m = re.search(r'\b(\d{5})\b', str(location))
+    if not m:
+        return [], "Не нашёл ZIP для Redfin"
+    zip_code = m.group(1)
+
+    # Шаг 1: autocomplete → region_id
+    try:
+        ac_url = (
+            f"https://www.redfin.com/stingray/do/location-autocomplete"
+            f"?location={zip_code}&v=2"
+        )
+        resp = requests.get(ac_url, headers=headers, timeout=12)
+        if resp.status_code != 200:
+            return [], f"Redfin autocomplete вернул {resp.status_code}"
+
+        text = resp.text.lstrip()
+        if text.startswith("{}&&"):
+            text = text[4:]
+        data = json.loads(text)
+
+        region_id = None
+        for section in (data.get("payload") or {}).get("sections") or []:
+            for row in section.get("rows") or []:
+                row_id = row.get("id") or {}
+                if str(row.get("type")) == "2":
+                    region_id = row_id.get("tableId")
+                    break
+            if region_id:
+                break
+
+        if not region_id:
+            return [], f"Redfin: не нашёл region_id для ZIP {zip_code}"
+
+    except Exception as e:
+        return [], f"Redfin недоступен: {e}"
+
+    # Шаг 2: скачиваем CSV листингов
+    all_listings = []
+    for page in range(1, max_pages + 1):
+        try:
+            params = {
+                "al": "1",
+                "num_homes": "350",
+                "ord": "days-on-market-desc",
+                "page_number": str(page),
+                "region_id": str(region_id),
+                "region_type": "2",
+                "sf": "1,2,3,5,6,7",
+                "status": "9",
+                "uipt": "1,2,3,4,5,6,7,8",
+                "v": "8",
+            }
+            csv_url = "https://www.redfin.com/stingray/api/gis-csv"
+            resp = requests.get(csv_url, params=params, headers=headers, timeout=20)
+
+            if resp.status_code != 200 or len(resp.text or "") < 50:
+                break
+
+            reader = _csv.DictReader(io.StringIO(resp.text))
+            rows = list(reader)
+            if not rows:
+                break
+
+            for row in rows:
+                parsed = _parse_redfin_csv_row(row, zip_code)
+                if parsed:
+                    # Клиентская фильтрация
+                    if price_min and (parsed.get("price") or 0) < price_min:
+                        continue
+                    if price_max and (parsed.get("price") or 0) > price_max:
+                        continue
+                    if bed_min and (parsed.get("beds") or 0) < bed_min:
+                        continue
+                    if year_max and (parsed.get("year_built") or 9999) > year_max:
+                        continue
+                    all_listings.append(parsed)
+
+            if on_progress:
+                on_progress(page, max_pages, len(all_listings))
+
+            if len(rows) < 100:
+                break
+            if page < max_pages:
+                time.sleep(1.5)
+
+        except Exception:
+            break
+
+    return all_listings, None
+
+
+def _parse_redfin_csv_row(row, default_zip=""):
+    """Парсит одну строку Redfin CSV в наш стандартный формат listing."""
+    try:
+        prop_type = (row.get("PROPERTY TYPE") or "").upper()
+        if prop_type and prop_type not in ("", "SINGLE FAMILY RESIDENTIAL", "HOUSE"):
+            skip_types = ("CONDO/CO-OP", "TOWNHOUSE", "MULTI-FAMILY (2-4 UNIT)",
+                          "LAND", "MOBILE/MANUFACTURED HOME", "VACANT LAND")
+            if any(t in prop_type for t in skip_types):
+                return None
+
+        def safe_str(key):
+            return (row.get(key) or "").strip()
+
+        def safe_int(s):
+            try:
+                return int(float(s)) if s and s.strip() else None
+            except (ValueError, TypeError):
+                return None
+
+        def safe_float(s):
+            try:
+                return float(s) if s and s.strip() else None
+            except (ValueError, TypeError):
+                return None
+
+        price_str = safe_str("PRICE").replace("$", "").replace(",", "")
+        price = safe_int(price_str)
+        if not price or price < 10000:
+            return None
+
+        beds = safe_int(safe_str("BEDS"))
+        baths = safe_float(safe_str("BATHS"))
+        sqft = safe_int(safe_str("SQUARE FEET").replace(",", ""))
+        year = safe_int(safe_str("YEAR BUILT"))
+        dom = safe_int(safe_str("DAYS ON MARKET"))
+        psqft = safe_int(safe_str("$/SQUARE FEET").replace("$", ""))
+        lat = safe_float(safe_str("LATITUDE"))
+        lon = safe_float(safe_str("LONGITUDE"))
+
+        address = safe_str("ADDRESS")
+        city = safe_str("CITY")
+        state = safe_str("STATE OR PROVINCE") or "CA"
+        zip_code = safe_str("ZIP OR POSTAL CODE") or default_zip
+
+        if not address:
+            return None
+
+        redfin_url = safe_str("URL (SEE https://www.redfin.com)")
+        if redfin_url and not redfin_url.startswith("http"):
+            redfin_url = "https://www.redfin.com" + redfin_url
+
+        return {
+            "zpid": None,
+            "address_street": f"{address}, {city}, {state}",
+            "address_full": f"{address}, {city}, {state} {zip_code}".strip(),
+            "city": city,
+            "state": state,
+            "zip": zip_code,
+            "price": price,
+            "price_per_sqft": psqft,
+            "zestimate": None,
+            "rent_zestimate": None,
+            "beds": beds,
+            "baths": baths,
+            "sqft": sqft,
+            "year_built": year,
+            "lot_sqft": None,
+            "property_type": "SINGLE_FAMILY",
+            "days_on_market": dom,
+            "tax_assessed": None,
+            "listing_status": "For_Sale",
+            "photo_url": None,
+            "zillow_url": redfin_url or None,
+            "lat": lat,
+            "lon": lon,
+            "highlights": [],
+            "_source": "redfin",
+        }
+    except Exception:
+        return None
+
+
+# ============================================================
+# PROPWIRE CSV PARSER (пользователь скачивает CSV с propwire.com)
+# ============================================================
+
+def parse_propwire_csv(csv_bytes_or_text):
+    """
+    Парсит CSV экспорт с Propwire в стандартный формат listing.
+    Propwire даёт distressed / absentee / pre-foreclosure объекты.
+
+    Returns: (listings_list, error_msg_or_None)
+    """
+    import io
+    import csv as _csv
+
+    try:
+        if isinstance(csv_bytes_or_text, bytes):
+            text = csv_bytes_or_text.decode("utf-8-sig", errors="replace")
+        else:
+            text = str(csv_bytes_or_text)
+
+        reader = _csv.DictReader(io.StringIO(text))
+        rows = list(reader)
+        if not rows:
+            return [], "CSV пустой"
+
+        # Карта column names → ключ (Propwire меняет названия между версиями)
+        first_row = rows[0]
+        raw_cols = {k.upper().strip(): k for k in first_row.keys()}
+
+        def get_col(row, *candidates):
+            for c in candidates:
+                k = raw_cols.get(c.upper())
+                if k is not None and row.get(k):
+                    return str(row[k]).strip()
+            return ""
+
+        def safe_int(s):
+            try:
+                return int(float(s.replace(",", "").replace("$", ""))) if s else None
+            except (ValueError, TypeError):
+                return None
+
+        def safe_float(s):
+            try:
+                return float(s) if s else None
+            except (ValueError, TypeError):
+                return None
+
+        listings = []
+        for row in rows:
+            try:
+                address = get_col(row, "PROPERTY ADDRESS", "ADDRESS", "STREET ADDRESS", "SITUS ADDRESS")
+                city = get_col(row, "CITY", "PROPERTY CITY", "SITUS CITY", "MAILING CITY")
+                state = get_col(row, "STATE", "PROPERTY STATE", "SITUS STATE") or "CA"
+                zip_code = get_col(row, "ZIP", "ZIP CODE", "POSTAL CODE", "SITUS ZIP")
+                if zip_code and len(zip_code) > 5:
+                    zip_code = zip_code[:5]
+
+                price_str = get_col(row,
+                    "ESTIMATED VALUE", "LIST PRICE", "PRICE", "MARKET VALUE",
+                    "ASSESSED VALUE", "LAST SALE PRICE", "ESTIMATED EQUITY")
+                price = safe_int(price_str)
+
+                beds = safe_int(get_col(row, "BEDROOMS", "BEDS", "BED COUNT", "BEDROOM COUNT"))
+                baths = safe_float(get_col(row, "BATHROOMS", "BATHS", "BATH COUNT", "BATHROOM COUNT"))
+                sqft_str = get_col(row, "SQUARE FOOTAGE", "SQFT", "SQUARE FEET",
+                                   "LIVING AREA", "BUILDING SQFT")
+                sqft = safe_int(sqft_str)
+                year = safe_int(get_col(row, "YEAR BUILT", "YEAR"))
+
+                if not address:
+                    continue
+
+                psqft = int(price / sqft) if price and sqft and sqft > 0 else None
+
+                listings.append({
+                    "zpid": None,
+                    "address_street": f"{address}, {city}, {state}",
+                    "address_full": f"{address}, {city}, {state} {zip_code}".strip(),
+                    "city": city,
+                    "state": state,
+                    "zip": zip_code,
+                    "price": price,
+                    "price_per_sqft": psqft,
+                    "zestimate": None,
+                    "rent_zestimate": None,
+                    "beds": beds,
+                    "baths": baths,
+                    "sqft": sqft,
+                    "year_built": year,
+                    "lot_sqft": None,
+                    "property_type": "SINGLE_FAMILY",
+                    "days_on_market": None,
+                    "tax_assessed": None,
+                    "listing_status": "For_Sale",
+                    "photo_url": None,
+                    "zillow_url": None,
+                    "lat": None,
+                    "lon": None,
+                    "highlights": [],
+                    "_source": "propwire",
+                })
+            except Exception:
+                continue
+
+        if not listings:
+            return [], "Не смог распознать данные — проверь формат CSV"
+
+        return listings, None
+
+    except Exception as e:
+        return [], f"Ошибка парсинга CSV: {e}"
